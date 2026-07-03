@@ -45,6 +45,7 @@ const vertSrc=`attribute vec2 aPos;void main(){gl_Position=vec4(aPos,0.0,1.0);}`
 const fragSrc=`precision highp float;
 uniform vec2 iResolution;uniform float iTime;uniform sampler2D iChannel0;uniform sampler2D iChannel1;
 uniform float uBass;uniform float uMid;uniform float uTreble;uniform float uAudioLevel;
+
 vec4 noiseTex(in vec2 x){vec2 xi=mod(x,1024.0);return texture2D(iChannel0,(xi+0.5)/1024.0);}
 float accelProfile(float t){float rampT=clamp(t/60.0,0.0,1.0);float quad=rampT*rampT;float terminal=smoothstep(60.0,82.0,t);return mix(quad,1.0,terminal);}
 float velocity(float t){return 0.05+1.35*accelProfile(t);}
@@ -53,9 +54,87 @@ float hash12(vec2 p){vec2 q=fract(p*vec2(443.897,441.423));q+=dot(q,q+19.19);ret
 float noise3(vec3 p){vec3 i=floor(p),f=fract(p),u=f*f*(3.0-2.0*f);vec2 ii=i.xy+i.z*vec2(5.0);float a=hash12(ii+vec2(0,0)),b=hash12(ii+vec2(1,0)),c=hash12(ii+vec2(0,1)),d=hash12(ii+vec2(1,1));float v1=mix(mix(a,b,u.x),mix(c,d,u.x),u.y);ii+=vec2(5.0);a=hash12(ii+vec2(0,0));b=hash12(ii+vec2(1,0));c=hash12(ii+vec2(0,1));d=hash12(ii+vec2(1,1));float v2=mix(mix(a,b,u.x),mix(c,d,u.x),u.y);return max(mix(v1,v2,u.z),0.0);}
 float fbmCloud(vec3 x){float r=0.0,w=1.0,s=1.0;for(int i=0;i<3;i++){w*=0.25;s*=3.0;r+=w*noise3(s*x);}return r;}
 vec3 nebulaClouds(vec2 px,vec2 center,float iT){vec3 p=vec3((px-center)*0.008,iT*0.35);float n1=fbmCloud(p*1.4+vec3(0.0,iT*0.05,0.0));float n2=fbmCloud(p*2.2-vec3(0.0,0.0,iT*0.07));return vec3(1.0,0.5,0.4)*n1*1.6+vec3(0.1,0.6,0.75)*n2*1.3;}
-float ridgedNoise(vec2 p){float n=noiseTex(p).x;return 1.0-abs(n*2.0-1.0);}
-float plasmaFbm(vec2 p){float z=1.0,rz=0.0;mat2 m=mat2(0.8,0.6,-0.6,0.8);for(int i=0;i<3;i++){rz+=ridgedNoise(p)/z;z*=1.9;p=p*2.0*m;}return rz;}
-vec4 plasmaTunnelTexture(vec2 fragCoord,float iT,float vel){vec2 uv=(fragCoord-iResolution.xy*0.5)/(iResolution.y*0.5);float r=length(uv);float ang=atan(uv.y,uv.x);float dep=1.0/max(r,0.02);float scroll=iT*(0.55+0.65*vel);vec2 tunnelUV=vec2(ang*(2.4/3.14159265)+0.15*sin(dep*0.12+iT*0.4),dep*0.16-scroll);float fil=plasmaFbm(tunnelUV*2.8);float band=plasmaFbm(vec2(tunnelUV.x*0.65+3.1,tunnelUV.y*1.7));float val=smoothstep(0.38,1.25,fil)*0.8+smoothstep(0.52,1.35,band)*0.55;float wall=smoothstep(0.22,0.55,r)*(1.0-smoothstep(0.92,1.18,r));float centerVoid=1.0-smoothstep(0.0,0.18,r);val*=wall;vec3 plasma=mix(vec3(0.55,0.02,0.86),vec3(0.08,0.88,1.0),clamp(val,0.0,1.0));plasma=mix(plasma,vec3(1.0,0.22,0.9),smoothstep(0.45,1.0,val));return vec4(plasma,clamp(val*0.95,0.0,1.0)*(1.0-centerVoid));}
+
+// ---------------------------------------------------------------
+// REALISTIC WARP TUNNEL  (replaces old plasma circle)
+// Raymarches a cylindrical tunnel with:
+//   - perspective-correct receding rings
+//   - relativistic blue-white streak lighting on the walls
+//   - surface detail noise baked into the wall
+//   - open dark centre so star tunnels show through
+// ---------------------------------------------------------------
+vec4 warpTunnel(vec2 fragCoord, float iT, float vel, float bass){
+  vec2 uv = (fragCoord - iResolution.xy*0.5) / iResolution.y;
+
+  // Ray direction — straight through the screen
+  vec3 ro = vec3(0.0, 0.0, 0.0);
+  vec3 rd = normalize(vec3(uv, 1.0));
+
+  // Tunnel radius that breathes slightly with bass
+  float tunnelR = 0.42 + 0.04*bass;
+
+  // Analytic ray-cylinder intersection  (cylinder axis = Z)
+  // |rd.xy|^2 * t^2 + 2*(ro.xy . rd.xy)*t + (|ro.xy|^2 - R^2) = 0
+  float a = dot(rd.xy, rd.xy);
+  float b2 = dot(ro.xy, rd.xy);   // b/2
+  float c = dot(ro.xy, ro.xy) - tunnelR*tunnelR;
+  float disc = b2*b2 - a*c;
+  if(disc < 0.0) return vec4(0.0);  // ray misses cylinder
+
+  // We want the FAR intersection (inside the tunnel looking forward)
+  float t = (-b2 + sqrt(disc)) / a;
+  if(t < 0.01) return vec4(0.0);
+
+  vec3 hit = ro + rd*t;
+
+  // --- UV on tunnel wall ---
+  float ang  = atan(hit.y, hit.x);                        // -PI..PI
+  float dep  = hit.z;                                     // depth along tunnel
+  float scroll = iT*(0.8 + 1.8*vel);                     // forward rush speed
+
+  vec2 wallUV = vec2(ang / 3.14159265, dep*0.18 - scroll);
+
+  // --- Surface detail: subtle grime / panel lines ---
+  float detail = noiseTex(wallUV * vec2(3.0, 6.0) * 60.0).x;
+  float panel  = abs(fract(wallUV.y * 8.0) - 0.5);       // ring lines
+  float groove = smoothstep(0.45, 0.5, panel);            // thin dark grooves
+  float surface = mix(0.18, 0.28, detail) * (1.0 - groove*0.6);
+
+  // --- Relativistic streak lighting ---
+  // Light appears blue-shifted and concentrated at ring boundaries
+  float ringPhase = fract(wallUV.y * 8.0);               // 0..1 per ring
+  float streakMask = pow(1.0 - abs(ringPhase - 0.5)*2.0, 3.0); // bright at ring centres
+  float streakNoise = noiseTex(vec2(ang*4.0, wallUV.y*12.0 + iT*0.1)*30.0).x;
+  float streak = streakMask * mix(0.3, 1.0, streakNoise);
+
+  // Speed-dependent glow: dim grey at slow, blue-white at warp
+  vec3 wallBase  = vec3(0.06, 0.07, 0.10);               // dark gunmetal
+  vec3 streakCol = mix(
+    vec3(0.55, 0.72, 1.00),                              // slow: soft blue
+    vec3(0.85, 0.95, 1.00),                              // fast: near-white
+    clamp(vel, 0.0, 1.0)
+  );
+
+  vec3 wallCol = wallBase * surface + streakCol * streak * (0.4 + 0.8*vel);
+
+  // --- Rim glow at the tunnel mouth (depth fade) ---
+  float depthFade = 1.0 - clamp(dep * 0.28, 0.0, 1.0);
+  wallCol *= depthFade;
+
+  // --- Angular vignette: darker sides, brighter top/bottom of ring ---
+  float angVig = 0.6 + 0.4*abs(sin(ang));
+  wallCol *= angVig;
+
+  // Alpha: only paint the annular band — leave centre fully transparent
+  // so the star tunnels are still fully visible through the middle
+  float r2d = length(uv);
+  float alpha = smoothstep(0.10, 0.22, r2d) * (0.55 + 0.30*vel);
+  alpha *= clamp(depthFade * 1.5, 0.0, 1.0);
+
+  return vec4(wallCol, alpha);
+}
+// ---------------------------------------------------------------
+
 mat2 flareRot=mat2(0.80,0.60,-0.60,0.80);
 float flareNoise(vec2 x){return noiseTex(x*0.05).x;}
 float flareFbm(vec2 p){float z=2.0,rz=-0.05;p*=0.25;for(int i=1;i<4;i++){rz+=abs((flareNoise(p)-0.5)*2.0)/z;z*=2.0;p=p*2.0*flareRot;}return rz;}
@@ -63,7 +142,103 @@ vec3 energyStreaks(vec2 px,vec2 center,float iT,float bass){float ft=-iT*0.33;ve
 vec3 interstellar1(vec2 fragCoord,float iT){vec3 ray;ray.xy=2.0*(fragCoord-iResolution.xy*.5)/iResolution.x;ray.z=0.5;float offset=iT*iT*0.19;float safeOff=max(offset,0.001);float speed2=0.0009*iT*offset;float speed=speed2*iT/safeOff*speed2+0.28;vec3 col=vec3(0),stp=ray/max(abs(ray.x),abs(ray.y)),pos=2.0*stp+.5;for(int i=0;i<20;i++){float z=noiseTex(pos.xy).x;z=fract(z-offset);float d=50.0*z-pos.z;float w=pow(max(0.0,1.0-8.0*length(fract(pos.xy)-.5)),2.0);vec3 cc=max(vec3(0),vec3(1.0-abs(d+speed2*.5)/speed,1.0-abs(d)/speed,1.0-abs(d-speed2*.5)/speed));col+=1.5*(1.0-z)*cc*w;pos+=stp;}return col;}
 vec3 interstellar2(vec2 fragCoord,float iT){vec3 ray;ray.xy=50.0*(fragCoord-iResolution.xy*.5)/iResolution.x*iT;ray.z=0.6;float WIP=abs(fract(ray.z)),offset=iT*iT*0.01;float safeOff=max(offset,0.001),safeT=max(iT,0.001);float speed2=0.0000075/safeT*offset;float speed=speed2*iT/safeOff*speed2+0.20*abs(WIP);vec3 col=vec3(0),stp=ray/max(abs(ray.x),abs(ray.y)*WIP/max(cos(WIP*WIP),0.1)),pos=10.0*stp+.5;for(int i=0;i<20;i++){float z=noiseTex(pos.xy).x;z=fract(z-offset);float d=9.0*z-pos.z;float w=pow(max(0.0,1.0-8.0*length(fract(pos.xy)-.5)),2.0);vec3 cc=max(vec3(0),vec3(3.215-abs(d+speed2+.9)/max(abs(speed2),0.001),cos(offset)-abs(d)/max(speed,0.001),1.0-abs(d-speed2*.5)/max(speed,0.001)));col+=1.5*(3.0-z)*cc*w;pos+=stp*abs(fract(WIP));}return col;}
 vec3 interstellarConstant(vec2 fragCoord,float iT){vec3 ray;ray.xy=5.0*(fragCoord-iResolution.xy*.5)/iResolution.x;ray.z=0.5;float offset=iT*iT*0.19;float safeOff=max(offset,0.001);float speed2=0.0009*iT*offset;float speed=speed2*iT/safeOff*speed2+0.28;vec3 col=vec3(0),stp=ray/max(abs(ray.x),abs(ray.y)),pos=2.0*stp+.5;for(int i=0;i<20;i++){float z=noiseTex(pos.xy).x;z=fract(z-offset);float d=50.0*z-pos.z;float w=pow(max(0.0,1.0-8.0*length(fract(pos.xy)-.5)),2.0);vec3 cc=max(vec3(0),vec3(1.0-abs(d+speed2*.5)/speed,0.545-abs(d)/speed,1.0-abs(d-speed2*.5)/speed));col+=1.5*(1.0-z)*cc*w;pos+=stp;}return col;}
-void main(){float t=iTime;float vel=velocity(t);vec2 R=iResolution.xy,fragCoord=gl_FragCoord.xy,uv=fragCoord/R,center=R*0.5;float dtRot=max(0.0,t-25.0);float tau=6.0;float rotMax=0.09+0.05*uBass;float rawSpin=rotMax*dtRot-rotMax*tau*(1.0-exp(-dtRot/tau))+0.004*dtRot*dtRot;float globalSpin=min(rawSpin,12.566);float shakeAmt=step(25.0,t)*vel*(0.005+0.01*uAudioLevel);vec2 fc=fragCoord+shakeAmt*vec2(sin(t*37.0)+sin(t*13.7),cos(t*29.0)+cos(t*17.3))*R.x;fc=rotAround(fc,center,globalSpin);float breathe=0.02*sin(t*1.3)+0.015*uMid*sin(t*4.7);vec2 fcFov=center+(fc-center)*(mix(1.0,1.55,vel)+0.15*uBass+breathe);float spin1=0.05*t+0.15*vel+0.05*uMid;float spin2=-0.035*t-0.10*vel-0.05*uMid;float spin3=0.02*t+0.22*vel+0.08*uTreble;vec2 dir=normalize(fcFov-center+1e-4);float blurLen=mix(0.002,0.03,vel)+0.02*uAudioLevel;const int BLUR_TAPS=4;vec3 blend=vec3(0);for(int k=0;k<BLUR_TAPS;k++){float f=float(k)/float(BLUR_TAPS-1)-0.5;vec2 sp=fcFov+dir*f*blurLen*R.x;vec3 i1=interstellar1(rotAround(sp,center,spin1),t);vec3 i2=interstellar2(rotAround(sp,center,spin2),t);vec3 i3=interstellarConstant(rotAround(sp,center,spin3),t);vec3 b12=mix(i1,i2,clamp(0.35+0.5*vel,0.0,0.9));blend+=mix(b12,b12+i3*0.5,0.6);}blend/=float(BLUR_TAPS);vec3 col=blend*0.85;vec3 nebula=nebulaClouds(fcFov,center,t);float nb=1.0-clamp(dot(col,vec3(0.299,0.587,0.114))*1.4,0.0,1.0);col+=nebula*nb*0.9;vec4 pt=plasmaTunnelTexture(fcFov,t,vel);col=mix(col,col+pt.rgb*1.05,pt.a*0.48);vec3 prev=texture2D(iChannel1,uv).rgb;col=mix(col,prev*0.985,clamp(0.25+0.6*vel,0.0,0.9)*0.55);float thresh=0.55-0.15*uAudioLevel;vec3 bright=max(col-thresh,0.0),bloomAccum=vec3(0);const int BLOOM_TAPS=8;float bRad=mix(0.006,0.02,uAudioLevel)*R.x;for(int b=0;b<BLOOM_TAPS;b++){float ba=6.28318530*float(b)/float(BLOOM_TAPS);bloomAccum+=max(texture2D(iChannel1,(fragCoord+vec2(cos(ba),sin(ba))*bRad)/R).rgb-thresh,0.0);}col+=(bright+bloomAccum/float(BLOOM_TAPS))*(0.6+1.8*uAudioLevel);col+=energyStreaks(fcFov,center,t,uBass)*(0.35+0.5*uBass)*0.5;float luma=dot(col,vec3(0.299,0.587,0.114));col=mix(vec3(luma),col,mix(0.85,1.35,clamp(vel,0.0,1.0))+0.15*uTreble);float cm=clamp(vel,0.0,1.0);vec3 warm=col*vec3(1.15,0.95,0.75),blue=col*vec3(0.5,0.72,1.4);col=mix(mix(warm,blue,smoothstep(0.0,1.0,cm)),blue,cm*0.5);col=col/(1.0+col*0.35);float vig=1.0-mix(0.25,0.75,vel)*smoothstep(0.4,1.15,length((fragCoord-center)/center));gl_FragColor=vec4(col*vig,1.0);}`;function compile(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){const e=gl.getShaderInfoLog(s);statusEl.textContent='Shader error: '+e;console.error(e);}return s;}const prog=gl.createProgram();gl.attachShader(prog,compile(gl.VERTEX_SHADER,vertSrc));gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,fragSrc));gl.linkProgram(prog);if(!gl.getProgramParameter(prog,gl.LINK_STATUS))statusEl.textContent='Link error: '+gl.getProgramInfoLog(prog);gl.useProgram(prog);const blitProg=gl.createProgram();gl.attachShader(blitProg,compile(gl.VERTEX_SHADER,vertSrc));gl.attachShader(blitProg,compile(gl.FRAGMENT_SHADER,`precision mediump float;uniform sampler2D uTex;uniform vec2 uRes;void main(){gl_FragColor=texture2D(uTex,gl_FragCoord.xy/uRes);}`));gl.linkProgram(blitProg);const blitUTex=gl.getUniformLocation(blitProg,'uTex'),blitURes=gl.getUniformLocation(blitProg,'uRes'),blitAPos=gl.getAttribLocation(blitProg,'aPos');const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);const aPos=gl.getAttribLocation(prog,'aPos');gl.enableVertexAttribArray(aPos);gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);const uRes=gl.getUniformLocation(prog,'iResolution'),uTime=gl.getUniformLocation(prog,'iTime'),uCh0=gl.getUniformLocation(prog,'iChannel0'),uCh1=gl.getUniformLocation(prog,'iChannel1'),uBassLoc=gl.getUniformLocation(prog,'uBass'),uMidLoc=gl.getUniformLocation(prog,'uMid'),uTrebleLoc=gl.getUniformLocation(prog,'uTreble'),uAudioLvlLoc=gl.getUniformLocation(prog,'uAudioLevel');const nd=new Uint8Array(1024*1024*4);for(let i=0;i<nd.length;i++)nd[i]=Math.random()*256|0;const nTex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,nTex);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1024,1024,0,gl.RGBA,gl.UNSIGNED_BYTE,nd);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);function makeFBO(w,h){const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);gl.bindFramebuffer(gl.FRAMEBUFFER,null);return {tex,fbo,w,h};}let fboA,fboB;function initFBOs(){fboA=makeFBO(canvas.width,canvas.height);fboB=makeFBO(canvas.width,canvas.height);}initFBOs();const audioEl=document.getElementById('audioEl'),trackSel=document.getElementById('track'),playBtn=document.getElementById('playBtn'),stopBtn=document.getElementById('stopBtn'),restartBtn=document.getElementById('restartBtn');let audioCtx,analyser,freqData,bassLevel=0,midLevel=0,trebleLevel=0,audioLevel=0;function setupAudio(){if(audioCtx)return;audioCtx=new(window.AudioContext||window.webkitAudioContext)();analyser=audioCtx.createAnalyser();analyser.fftSize=1024;freqData=new Uint8Array(analyser.frequencyBinCount);audioCtx.createMediaElementSource(audioEl).connect(analyser);analyser.connect(audioCtx.destination);}function updateAudio(){if(!analyser)return;analyser.getByteFrequencyData(freqData);const n=freqData.length,be=Math.floor(n*.08),me=Math.floor(n*.35);let ba=0,mi=0,tr=0;for(let i=0;i<be;i++)ba+=freqData[i];for(let i=be;i<me;i++)mi+=freqData[i];for(let i=me;i<n;i++)tr+=freqData[i];ba/=be*255;mi/=(me-be)*255;tr/=(n-me)*255;bassLevel=bassLevel*.7+ba*.3;midLevel=midLevel*.7+mi*.3;trebleLevel=trebleLevel*.7+tr*.3;audioLevel=(bassLevel+midLevel+trebleLevel)/3;}let startTime=performance.now(),isPlaying=false,hasStarted=false;audioEl.addEventListener('ended',()=>{startTime=performance.now();audioEl.currentTime=0;isPlaying=true;audioEl.play();});playBtn.addEventListener('click',async()=>{setupAudio();if(!hasStarted||audioEl.src!==trackSel.value){audioEl.src=trackSel.value;audioEl.currentTime=0;}try{await audioEl.play();if(audioCtx.state==='suspended')await audioCtx.resume();if(!hasStarted){startTime=performance.now();hasStarted=true;}isPlaying=true;statusEl.textContent='Playing: '+trackSel.options[trackSel.selectedIndex].text;}catch(e){statusEl.textContent='Playback failed: '+e.message;}});stopBtn.addEventListener('click',()=>{isPlaying=false;audioEl.pause();statusEl.textContent='Stopped.';});restartBtn.addEventListener('click',async()=>{setupAudio();audioEl.src=trackSel.value;audioEl.currentTime=0;startTime=performance.now();hasStarted=true;try{await audioEl.play();if(audioCtx.state==='suspended')await audioCtx.resume();isPlaying=true;statusEl.textContent='Restarted: '+trackSel.options[trackSel.selectedIndex].text;}catch(e){statusEl.textContent='Playback failed: '+e.message;}});trackSel.addEventListener('change',async()=>{if(!audioCtx||!hasStarted)return;audioEl.src=trackSel.value;audioEl.currentTime=0;await audioEl.play();startTime=performance.now();isPlaying=true;statusEl.textContent='Playing: '+trackSel.options[trackSel.selectedIndex].text;});function renderPass(tgt,prevTex,t){gl.bindFramebuffer(gl.FRAMEBUFFER,tgt?tgt.fbo:null);gl.viewport(0,0,tgt?tgt.w:canvas.width,tgt?tgt.h:canvas.height);gl.useProgram(prog);gl.uniform2f(uRes,tgt?tgt.w:canvas.width,tgt?tgt.h:canvas.height);gl.uniform1f(uTime,t);gl.uniform1f(uBassLoc,bassLevel);gl.uniform1f(uMidLoc,midLevel);gl.uniform1f(uTrebleLoc,trebleLevel);gl.uniform1f(uAudioLvlLoc,audioLevel);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,nTex);gl.uniform1i(uCh0,0);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,prevTex);gl.uniform1i(uCh1,1);gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.enableVertexAttribArray(aPos);gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);}let pp=true;function blitToScreen(tex){gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,window.innerWidth,window.innerHeight);gl.useProgram(blitProg);gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.enableVertexAttribArray(blitAPos);gl.vertexAttribPointer(blitAPos,2,gl.FLOAT,false,0,0);gl.uniform2f(blitURes,window.innerWidth,window.innerHeight);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tex);gl.uniform1i(blitUTex,0);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);}gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);function frame(){if(!isPlaying){requestAnimationFrame(frame);return;}updateAudio();const t=(performance.now()-startTime)/1000;const rTex=pp?fboB.tex:fboA.tex,wFBO=pp?fboA:fboB;renderPass(wFBO,rTex,t);blitToScreen(wFBO.tex);pp=!pp;requestAnimationFrame(frame);}requestAnimationFrame(frame);
+
+void main(){
+  float t=iTime;float vel=velocity(t);
+  vec2 R=iResolution.xy,fragCoord=gl_FragCoord.xy,uv=fragCoord/R,center=R*0.5;
+  float dtRot=max(0.0,t-25.0);float tau=6.0;float rotMax=0.09+0.05*uBass;
+  float rawSpin=rotMax*dtRot-rotMax*tau*(1.0-exp(-dtRot/tau))+0.004*dtRot*dtRot;
+  float globalSpin=min(rawSpin,12.566);
+  float shakeAmt=step(25.0,t)*vel*(0.005+0.01*uAudioLevel);
+  vec2 fc=fragCoord+shakeAmt*vec2(sin(t*37.0)+sin(t*13.7),cos(t*29.0)+cos(t*17.3))*R.x;
+  fc=rotAround(fc,center,globalSpin);
+  float breathe=0.02*sin(t*1.3)+0.015*uMid*sin(t*4.7);
+  vec2 fcFov=center+(fc-center)*(mix(1.0,1.55,vel)+0.15*uBass+breathe);
+  float spin1=0.05*t+0.15*vel+0.05*uMid;
+  float spin2=-0.035*t-0.10*vel-0.05*uMid;
+  float spin3=0.02*t+0.22*vel+0.08*uTreble;
+  vec2 dir=normalize(fcFov-center+1e-4);
+  float blurLen=mix(0.002,0.03,vel)+0.02*uAudioLevel;
+  const int BLUR_TAPS=4;
+  vec3 blend=vec3(0);
+  for(int k=0;k<BLUR_TAPS;k++){
+    float f=float(k)/float(BLUR_TAPS-1)-0.5;
+    vec2 sp=fcFov+dir*f*blurLen*R.x;
+    vec3 i1=interstellar1(rotAround(sp,center,spin1),t);
+    vec3 i2=interstellar2(rotAround(sp,center,spin2),t);
+    vec3 i3=interstellarConstant(rotAround(sp,center,spin3),t);
+    vec3 b12=mix(i1,i2,clamp(0.35+0.5*vel,0.0,0.9));
+    blend+=mix(b12,b12+i3*0.5,0.6);
+  }
+  blend/=float(BLUR_TAPS);
+  vec3 col=blend*0.85;
+  vec3 nebula=nebulaClouds(fcFov,center,t);
+  float nb=1.0-clamp(dot(col,vec3(0.299,0.587,0.114))*1.4,0.0,1.0);
+  col+=nebula*nb*0.9;
+
+  // Warp tunnel overlay (replaces old plasma circle)
+  vec4 wt=warpTunnel(fcFov,t,vel,uBass);
+  col=mix(col, col+wt.rgb, wt.a);
+
+  vec3 prev=texture2D(iChannel1,uv).rgb;
+  col=mix(col,prev*0.985,clamp(0.25+0.6*vel,0.0,0.9)*0.55);
+  float thresh=0.55-0.15*uAudioLevel;
+  vec3 bright=max(col-thresh,0.0),bloomAccum=vec3(0);
+  const int BLOOM_TAPS=8;
+  float bRad=mix(0.006,0.02,uAudioLevel)*R.x;
+  for(int b=0;b<BLOOM_TAPS;b++){float ba=6.28318530*float(b)/float(BLOOM_TAPS);bloomAccum+=max(texture2D(iChannel1,(fragCoord+vec2(cos(ba),sin(ba))*bRad)/R).rgb-thresh,0.0);}
+  col+=(bright+bloomAccum/float(BLOOM_TAPS))*(0.6+1.8*uAudioLevel);
+  col+=energyStreaks(fcFov,center,t,uBass)*(0.35+0.5*uBass)*0.5;
+  float luma=dot(col,vec3(0.299,0.587,0.114));
+  col=mix(vec3(luma),col,mix(0.85,1.35,clamp(vel,0.0,1.0))+0.15*uTreble);
+  float cm=clamp(vel,0.0,1.0);
+  vec3 warm=col*vec3(1.15,0.95,0.75),blue=col*vec3(0.5,0.72,1.4);
+  col=mix(mix(warm,blue,smoothstep(0.0,1.0,cm)),blue,cm*0.5);
+  col=col/(1.0+col*0.35);
+  float vig=1.0-mix(0.25,0.75,vel)*smoothstep(0.4,1.15,length((fragCoord-center)/center));
+  gl_FragColor=vec4(col*vig,1.0);
+}`;
+function compile(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){const e=gl.getShaderInfoLog(s);statusEl.textContent='Shader error: '+e;console.error(e);}return s;}
+const prog=gl.createProgram();
+gl.attachShader(prog,compile(gl.VERTEX_SHADER,vertSrc));
+gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,fragSrc));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS))statusEl.textContent='Link error: '+gl.getProgramInfoLog(prog);
+gl.useProgram(prog);
+const blitProg=gl.createProgram();
+gl.attachShader(blitProg,compile(gl.VERTEX_SHADER,vertSrc));
+gl.attachShader(blitProg,compile(gl.FRAGMENT_SHADER,`precision mediump float;uniform sampler2D uTex;uniform vec2 uRes;void main(){gl_FragColor=texture2D(uTex,gl_FragCoord.xy/uRes);}`));
+gl.linkProgram(blitProg);
+const blitUTex=gl.getUniformLocation(blitProg,'uTex'),blitURes=gl.getUniformLocation(blitProg,'uRes'),blitAPos=gl.getAttribLocation(blitProg,'aPos');
+const buf=gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+const aPos=gl.getAttribLocation(prog,'aPos');
+gl.enableVertexAttribArray(aPos);gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);
+const uRes=gl.getUniformLocation(prog,'iResolution'),uTime=gl.getUniformLocation(prog,'iTime'),uCh0=gl.getUniformLocation(prog,'iChannel0'),uCh1=gl.getUniformLocation(prog,'iChannel1'),uBassLoc=gl.getUniformLocation(prog,'uBass'),uMidLoc=gl.getUniformLocation(prog,'uMid'),uTrebleLoc=gl.getUniformLocation(prog,'uTreble'),uAudioLvlLoc=gl.getUniformLocation(prog,'uAudioLevel');
+const nd=new Uint8Array(1024*1024*4);for(let i=0;i<nd.length;i++)nd[i]=Math.random()*256|0;
+const nTex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,nTex);
+gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1024,1024,0,gl.RGBA,gl.UNSIGNED_BYTE,nd);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+function makeFBO(w,h){const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);gl.bindFramebuffer(gl.FRAMEBUFFER,null);return {tex,fbo,w,h};}
+let fboA,fboB;function initFBOs(){fboA=makeFBO(canvas.width,canvas.height);fboB=makeFBO(canvas.width,canvas.height);}initFBOs();
+const audioEl=document.getElementById('audioEl'),trackSel=document.getElementById('track'),playBtn=document.getElementById('playBtn'),stopBtn=document.getElementById('stopBtn'),restartBtn=document.getElementById('restartBtn');
+let audioCtx,analyser,freqData,bassLevel=0,midLevel=0,trebleLevel=0,audioLevel=0;
+function setupAudio(){if(audioCtx)return;audioCtx=new(window.AudioContext||window.webkitAudioContext)();analyser=audioCtx.createAnalyser();analyser.fftSize=1024;freqData=new Uint8Array(analyser.frequencyBinCount);audioCtx.createMediaElementSource(audioEl).connect(analyser);analyser.connect(audioCtx.destination);}
+function updateAudio(){if(!analyser)return;analyser.getByteFrequencyData(freqData);const n=freqData.length,be=Math.floor(n*.08),me=Math.floor(n*.35);let ba=0,mi=0,tr=0;for(let i=0;i<be;i++)ba+=freqData[i];for(let i=be;i<me;i++)mi+=freqData[i];for(let i=me;i<n;i++)tr+=freqData[i];ba/=be*255;mi/=(me-be)*255;tr/=(n-me)*255;bassLevel=bassLevel*.7+ba*.3;midLevel=midLevel*.7+mi*.3;trebleLevel=trebleLevel*.7+tr*.3;audioLevel=(bassLevel+midLevel+trebleLevel)/3;}
+let startTime=performance.now(),isPlaying=false,hasStarted=false;
+audioEl.addEventListener('ended',()=>{startTime=performance.now();audioEl.currentTime=0;isPlaying=true;audioEl.play();});
+playBtn.addEventListener('click',async()=>{setupAudio();if(!hasStarted||audioEl.src!==trackSel.value){audioEl.src=trackSel.value;audioEl.currentTime=0;}try{await audioEl.play();if(audioCtx.state==='suspended')await audioCtx.resume();if(!hasStarted){startTime=performance.now();hasStarted=true;}isPlaying=true;statusEl.textContent='Playing: '+trackSel.options[trackSel.selectedIndex].text;}catch(e){statusEl.textContent='Playback failed: '+e.message;}});
+stopBtn.addEventListener('click',()=>{isPlaying=false;audioEl.pause();statusEl.textContent='Stopped.';});
+restartBtn.addEventListener('click',async()=>{setupAudio();audioEl.src=trackSel.value;audioEl.currentTime=0;startTime=performance.now();hasStarted=true;try{await audioEl.play();if(audioCtx.state==='suspended')await audioCtx.resume();isPlaying=true;statusEl.textContent='Restarted: '+trackSel.options[trackSel.selectedIndex].text;}catch(e){statusEl.textContent='Playback failed: '+e.message;}});
+trackSel.addEventListener('change',async()=>{if(!audioCtx||!hasStarted)return;audioEl.src=trackSel.value;audioEl.currentTime=0;await audioEl.play();startTime=performance.now();isPlaying=true;statusEl.textContent='Playing: '+trackSel.options[trackSel.selectedIndex].text;});
+function renderPass(tgt,prevTex,t){gl.bindFramebuffer(gl.FRAMEBUFFER,tgt?tgt.fbo:null);gl.viewport(0,0,tgt?tgt.w:canvas.width,tgt?tgt.h:canvas.height);gl.useProgram(prog);gl.uniform2f(uRes,tgt?tgt.w:canvas.width,tgt?tgt.h:canvas.height);gl.uniform1f(uTime,t);gl.uniform1f(uBassLoc,bassLevel);gl.uniform1f(uMidLoc,midLevel);gl.uniform1f(uTrebleLoc,trebleLevel);gl.uniform1f(uAudioLvlLoc,audioLevel);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,nTex);gl.uniform1i(uCh0,0);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,prevTex);gl.uniform1i(uCh1,1);gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.enableVertexAttribArray(aPos);gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);}
+let pp=true;
+function blitToScreen(tex){gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,window.innerWidth,window.innerHeight);gl.useProgram(blitProg);gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.enableVertexAttribArray(blitAPos);gl.vertexAttribPointer(blitAPos,2,gl.FLOAT,false,0,0);gl.uniform2f(blitURes,window.innerWidth,window.innerHeight);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tex);gl.uniform1i(blitUTex,0);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);}
+gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+function frame(){if(!isPlaying){requestAnimationFrame(frame);return;}updateAudio();const t=(performance.now()-startTime)/1000;const rTex=pp?fboB.tex:fboA.tex,wFBO=pp?fboA:fboB;renderPass(wFBO,rTex,t);blitToScreen(wFBO.tex);pp=!pp;requestAnimationFrame(frame);}
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>
