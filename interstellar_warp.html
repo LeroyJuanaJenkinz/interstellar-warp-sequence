@@ -17,16 +17,12 @@ canvas{display:block;width:100vw;height:100vh;}
 <label for="track">Track:</label>
 <select id="track">
 <option value="https://user.uploads.dev/file/ec81411f6e68961ceb8bd54609132d57.wav">WIPMIXER.wav</option>
-<option value="https://user.uploads.dev/file/021d5b2047a269c0b0af783ebe17e597.wav">wipris6.wav</option>
 <option value="https://user.uploads.dev/file/de7470bc2aad71af92ca2d2b5d5950ec.mp3">WIPRise.mp3</option>
-<option value="https://user.uploads.dev/file/9193bdef8d80face1b1e0cbfe6b85d87.mp3">Wiprise3.mp3</option>
 <option value="https://user.uploads.dev/file/67421238f33eb290b5522ca9c77e00fa.mp3">wiprise4.mp3</option>
-<option value="https://user.uploads.dev/file/23d576fc814b4cbe83901e5e7334af9e.wav">WIPRise5.wav</option>
+<option value="https://user.uploads.dev/file/8d304c96b9d564b02e918503695bde82.wav">WIPRise5(67bpm).wav</option>
 <option value="https://user.uploads.dev/file/b52dfafce99e8725db0d3efde45dd59c.wav">WIPRISEGRAND.wav</option>
 <option value="https://user.uploads.dev/file/34e7ed938370439ea3a7804056b991a0.wav">WIPRiseone.wav</option>
 <option value="https://user.uploads.dev/file/4ab0a41c9404d49838bf0175d0122b6a.wav">wipriseseven.wav</option>
-<option value="https://user.uploads.dev/file/415adfc241dd4f70a2fe63ffaff4de9b.wav">wiprisesix.wav</option>
-<option value="https://user.uploads.dev/file/ad26e2cb769d60435b3e05cc663311c4.wav">WipRiseTrip.wav</option>
 </select>
 <button id="playBtn">Play</button><button id="stopBtn">Stop</button><button id="restartBtn">Restart</button>
 <div id="status">Select a track and press Play to begin.</div>
@@ -56,81 +52,43 @@ float fbmCloud(vec3 x){float r=0.0,w=1.0,s=1.0;for(int i=0;i<3;i++){w*=0.25;s*=3
 vec3 nebulaClouds(vec2 px,vec2 center,float iT){vec3 p=vec3((px-center)*0.008,iT*0.35);float n1=fbmCloud(p*1.4+vec3(0.0,iT*0.05,0.0));float n2=fbmCloud(p*2.2-vec3(0.0,0.0,iT*0.07));return vec3(1.0,0.5,0.4)*n1*1.6+vec3(0.1,0.6,0.75)*n2*1.3;}
 
 // ---------------------------------------------------------------
-// REALISTIC WARP TUNNEL  (replaces old plasma circle)
-// Raymarches a cylindrical tunnel with:
-//   - perspective-correct receding rings
-//   - relativistic blue-white streak lighting on the walls
-//   - surface detail noise baked into the wall
-//   - open dark centre so star tunnels show through
+// REALISTIC WARP TUNNEL
 // ---------------------------------------------------------------
 vec4 warpTunnel(vec2 fragCoord, float iT, float vel, float bass){
   vec2 uv = (fragCoord - iResolution.xy*0.5) / iResolution.y;
-
-  // Ray direction — straight through the screen
   vec3 ro = vec3(0.0, 0.0, 0.0);
   vec3 rd = normalize(vec3(uv, 1.0));
-
-  // Tunnel radius that breathes slightly with bass
   float tunnelR = 0.42 + 0.04*bass;
-
-  // Analytic ray-cylinder intersection  (cylinder axis = Z)
-  // |rd.xy|^2 * t^2 + 2*(ro.xy . rd.xy)*t + (|ro.xy|^2 - R^2) = 0
   float a = dot(rd.xy, rd.xy);
-  float b2 = dot(ro.xy, rd.xy);   // b/2
+  float b2 = dot(ro.xy, rd.xy);
   float c = dot(ro.xy, ro.xy) - tunnelR*tunnelR;
   float disc = b2*b2 - a*c;
-  if(disc < 0.0) return vec4(0.0);  // ray misses cylinder
-
-  // We want the FAR intersection (inside the tunnel looking forward)
+  if(disc < 0.0) return vec4(0.0);
   float t = (-b2 + sqrt(disc)) / a;
   if(t < 0.01) return vec4(0.0);
-
   vec3 hit = ro + rd*t;
-
-  // --- UV on tunnel wall ---
-  float ang  = atan(hit.y, hit.x);                        // -PI..PI
-  float dep  = hit.z;                                     // depth along tunnel
-  float scroll = iT*(0.8 + 1.8*vel);                     // forward rush speed
-
+  float ang  = atan(hit.y, hit.x);
+  float dep  = hit.z;
+  float scroll = iT*(0.8 + 1.8*vel);
   vec2 wallUV = vec2(ang / 3.14159265, dep*0.18 - scroll);
-
-  // --- Surface detail: subtle grime / panel lines ---
   float detail = noiseTex(wallUV * vec2(3.0, 6.0) * 60.0).x;
-  float panel  = abs(fract(wallUV.y * 8.0) - 0.5);       // ring lines
-  float groove = smoothstep(0.45, 0.5, panel);            // thin dark grooves
+  float panel  = abs(fract(wallUV.y * 8.0) - 0.5);
+  float groove = smoothstep(0.45, 0.5, panel);
   float surface = mix(0.18, 0.28, detail) * (1.0 - groove*0.6);
-
-  // --- Relativistic streak lighting ---
-  // Light appears blue-shifted and concentrated at ring boundaries
-  float ringPhase = fract(wallUV.y * 8.0);               // 0..1 per ring
-  float streakMask = pow(1.0 - abs(ringPhase - 0.5)*2.0, 3.0); // bright at ring centres
+  float ringPhase = fract(wallUV.y * 8.0);
+  float streakMask = pow(1.0 - abs(ringPhase - 0.5)*2.0, 3.0);
   float streakNoise = noiseTex(vec2(ang*4.0, wallUV.y*12.0 + iT*0.1)*30.0).x;
   float streak = streakMask * mix(0.3, 1.0, streakNoise);
-
-  // Speed-dependent glow: dim grey at slow, blue-white at warp
-  vec3 wallBase  = vec3(0.06, 0.07, 0.10);               // dark gunmetal
-  vec3 streakCol = mix(
-    vec3(0.55, 0.72, 1.00),                              // slow: soft blue
-    vec3(0.85, 0.95, 1.00),                              // fast: near-white
-    clamp(vel, 0.0, 1.0)
-  );
-
+  vec3 wallBase  = vec3(0.06, 0.07, 0.10);
+  vec3 streakCol = mix(vec3(0.55, 0.72, 1.00), vec3(0.85, 0.95, 1.00), clamp(vel, 0.0, 1.0));
   vec3 wallCol = wallBase * surface + streakCol * streak * (0.4 + 0.8*vel);
-
-  // --- Rim glow at the tunnel mouth (depth fade) ---
   float depthFade = 1.0 - clamp(dep * 0.28, 0.0, 1.0);
   wallCol *= depthFade;
-
-  // --- Angular vignette: darker sides, brighter top/bottom of ring ---
   float angVig = 0.6 + 0.4*abs(sin(ang));
   wallCol *= angVig;
-
-  // Alpha: only paint the annular band — leave centre fully transparent
-  // so the star tunnels are still fully visible through the middle
   float r2d = length(uv);
   float alpha = smoothstep(0.10, 0.22, r2d) * (0.55 + 0.30*vel);
   alpha *= clamp(depthFade * 1.5, 0.0, 1.0);
-
   return vec4(wallCol, alpha);
 }
 // ---------------------------------------------------------------
@@ -175,11 +133,8 @@ void main(){
   vec3 nebula=nebulaClouds(fcFov,center,t);
   float nb=1.0-clamp(dot(col,vec3(0.299,0.587,0.114))*1.4,0.0,1.0);
   col+=nebula*nb*0.9;
-
-  // Warp tunnel overlay (replaces old plasma circle)
   vec4 wt=warpTunnel(fcFov,t,vel,uBass);
   col=mix(col, col+wt.rgb, wt.a);
-
   vec3 prev=texture2D(iChannel1,uv).rgb;
   col=mix(col,prev*0.985,clamp(0.25+0.6*vel,0.0,0.9)*0.55);
   float thresh=0.55-0.15*uAudioLevel;
