@@ -48,8 +48,69 @@ float velocity(float t){return 0.05+1.35*accelProfile(t);}
 vec2 rotAround(vec2 p,vec2 c,float a){vec2 d=p-c;float s=sin(a),co=cos(a);return c+vec2(d.x*co-d.y*s,d.x*s+d.y*co);}
 float hash12(vec2 p){vec2 q=fract(p*vec2(443.897,441.423));q+=dot(q,q+19.19);return fract(q.x*q.y);}
 float noise3(vec3 p){vec3 i=floor(p),f=fract(p),u=f*f*(3.0-2.0*f);vec2 ii=i.xy+i.z*vec2(5.0);float a=hash12(ii+vec2(0,0)),b=hash12(ii+vec2(1,0)),c=hash12(ii+vec2(0,1)),d=hash12(ii+vec2(1,1));float v1=mix(mix(a,b,u.x),mix(c,d,u.x),u.y);ii+=vec2(5.0);a=hash12(ii+vec2(0,0));b=hash12(ii+vec2(1,0));c=hash12(ii+vec2(0,1));d=hash12(ii+vec2(1,1));float v2=mix(mix(a,b,u.x),mix(c,d,u.x),u.y);return max(mix(v1,v2,u.z),0.0);}
-float fbmCloud(vec3 x){float r=0.0,w=1.0,s=1.0;for(int i=0;i<3;i++){w*=0.25;s*=3.0;r+=w*noise3(s*x);}return r;}
-vec3 nebulaClouds(vec2 px,vec2 center,float iT){vec3 p=vec3((px-center)*0.008,iT*0.35);float n1=fbmCloud(p*1.4+vec3(0.0,iT*0.05,0.0));float n2=fbmCloud(p*2.2-vec3(0.0,0.0,iT*0.07));return vec3(1.0,0.5,0.4)*n1*1.6+vec3(0.1,0.6,0.75)*n2*1.3;}
+
+// ---------------------------------------------------------------
+// RADIAL PLASMA LAYER (replaces nebulaClouds)
+// Raymarched plasma expanding outward from center in 360 degrees.
+// Speed scales with distance from center so outer rings move faster.
+// ---------------------------------------------------------------
+vec3 radialPlasma(vec2 fragCoord, float iT, float bass, float mid){
+  vec2 center = iResolution.xy * 0.5;
+  // Normalized coords centered, [-1..1] on shortest axis
+  vec2 uv = (fragCoord - center) / (0.5 * min(iResolution.x, iResolution.y));
+  // Distance from center drives speed — farther = faster
+  float dist = length(uv);
+  float radialSpeed = 1.0 + 2.5 * dist * dist; // quadratic ramp outward
+  // Audio reactivity
+  radialSpeed *= 1.0 + 0.5 * bass;
+  float tScaled = iT * radialSpeed;
+
+  // Remap fragCoord so the raymarch is centered and radially symmetric
+  vec2 I = fragCoord - center;
+  // Scale so effect fills screen
+  I *= 1.2 / max(iResolution.x, iResolution.y) * 2.0;
+  I += center * (1.2 / max(iResolution.x, iResolution.y) * 2.0);
+
+  float z = 0.0, d = 0.0, i = 0.0;
+  vec4 O = vec4(0.0);
+  float t = tScaled;
+
+  // Offset time by a small per-pixel radial phase so flow appears
+  // to originate at center and push outward
+  t += dist * 1.8;
+
+  for(; i < 20.0; i++){
+    // Ray sample point — use full-screen centered coords
+    vec2 sc = (fragCoord + fragCoord - iResolution.xy) / iResolution.y;
+    vec3 p = z * normalize(vec3(sc, 0.0) - vec3(0.0,0.0,0.0) + 0.0001) + 0.1;
+
+    // Polar transform + radial push (p.z offset drives outward expansion)
+    p = vec3(
+      atan(p.z + 9.0, p.x + 0.1) * 2.0,
+      0.6 * p.y + t + t,
+      length(p.xz) - 3.0
+    );
+
+    // Turbulence / refraction — modulated by mid frequencies
+    float dInner = 0.0;
+    for(; dInner < 7.0; dInner++)
+      p += sin(p.yzx * dInner + t + 0.5 * i) / (dInner + 0.001) * (1.0 + 0.3 * mid);
+
+    // Distance estimate
+    z += d = 0.4 * length(vec4(0.3 * cos(p) - 0.3, p.z));
+
+    // Colour accumulation
+    O += (1.0 + cos(p.y + i * 0.4 + vec4(6.0, 1.0, 2.0, 0.0))) / (d + 0.001);
+  }
+
+  // tanh tonemap — keeps it from blowing out
+  O = tanh(O * O / 6000.0);
+
+  // Fade out near the very centre so the star tunnel shows through
+  float centreMask = smoothstep(0.05, 0.35, dist);
+  return O.rgb * centreMask * (0.55 + 0.45 * bass);
+}
+// ---------------------------------------------------------------
 
 // ---------------------------------------------------------------
 // REALISTIC WARP TUNNEL
@@ -130,9 +191,12 @@ void main(){
   }
   blend/=float(BLUR_TAPS);
   vec3 col=blend*0.85;
-  vec3 nebula=nebulaClouds(fcFov,center,t);
+
+  // Radial plasma layer — replaces nebula clouds
+  vec3 plasma=radialPlasma(fcFov,t,uBass,uMid);
   float nb=1.0-clamp(dot(col,vec3(0.299,0.587,0.114))*1.4,0.0,1.0);
-  col+=nebula*nb*0.9;
+  col+=plasma*nb*0.9;
+
   vec4 wt=warpTunnel(fcFov,t,vel,uBass);
   col=mix(col, col+wt.rgb, wt.a);
   vec3 prev=texture2D(iChannel1,uv).rgb;
