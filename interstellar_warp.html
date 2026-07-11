@@ -48,21 +48,21 @@ float velocity(float t){return 0.05+1.35*accelProfile(t);}
 vec2 rotAround(vec2 p,vec2 c,float a){vec2 d=p-c;float s=sin(a),co=cos(a);return c+vec2(d.x*co-d.y*s,d.x*s+d.y*co);}
 float hash12(vec2 p){vec2 q=fract(p*vec2(443.897,441.423));q+=dot(q,q+19.19);return fract(q.x*q.y);}
 
+// WebGL1-safe tanh approximation (tanh not available in GLSL ES 1.00)
+float tanhApprox(float x){float e=exp(2.0*x);return(e-1.0)/(e+1.0);}
+
 // ---------------------------------------------------------------
 // RADIAL PLASMA LAYER - clean 2D sine plasma
 // Canonical centered UV, outward radial time offset,
-// tanh tonemap, strictly additive into dark regions only.
+// WebGL1-safe tonemap, strictly additive into dark regions only.
 // ---------------------------------------------------------------
 vec3 radialPlasma(vec2 fragCoord, float iT, float bass, float mid) {
-  // Canonical Shadertoy-style centered UV: [-aspect..aspect] x [-1..1]
   vec2 uv = (2.0 * fragCoord - iResolution.xy) / iResolution.y;
   float dist = length(uv);
   float angle = atan(uv.y, uv.x);
 
-  // Outward radial time: outer pixels run faster (quadratic)
   float radialT = iT * (0.7 + 1.8 * dist * dist) * (1.0 + 0.5 * bass);
 
-  // Layered sine plasma: cartesian + radial ring + spokes + spiral
   float p = 0.0;
   p += sin(uv.x * 3.1 + radialT);
   p += sin(uv.y * 2.7 - radialT * 0.9);
@@ -71,17 +71,14 @@ vec3 radialPlasma(vec2 fragCoord, float iT, float bass, float mid) {
   p += sin(angle * 4.0 + radialT * 0.7) * 0.6;
   p += sin(dist * 3.0 + angle * 3.0 - radialT) * (0.4 + 0.4 * mid);
 
-  // tanh tonemap on raw sum - prevents blowout
-  float pn = tanh(p * 0.5);
+  float pn = tanhApprox(p * 0.5);
 
-  // Warm orange/red/purple palette
   vec3 col;
   col.r = 0.5 + 0.5 * sin(pn * 3.14159 + 0.0);
   col.g = 0.5 + 0.5 * sin(pn * 3.14159 + 2.094);
   col.b = 0.5 + 0.5 * sin(pn * 3.14159 + 4.189);
   col *= vec3(1.1, 0.55, 1.0) * 0.5;
 
-  // Hollow centre (tunnel shows through) + soft screen-edge fade
   float centreFade = smoothstep(0.06, 0.45, dist);
   float edgeFade   = 1.0 - smoothstep(1.1, 1.85, dist);
   col *= centreFade * edgeFade * (0.45 + 0.35 * bass);
@@ -170,7 +167,7 @@ void main(){
   blend/=float(BLUR_TAPS);
   vec3 col=blend*0.85;
 
-  // Radial plasma - additive into dark regions only, cannot overwrite bright scene
+  // Radial plasma - additive into dark regions only
   vec3 plasma=radialPlasma(fcFov,t,uBass,uMid);
   float darkness=1.0-clamp(dot(col,vec3(0.299,0.587,0.114))*1.4,0.0,1.0);
   col+=plasma*darkness*0.7;
